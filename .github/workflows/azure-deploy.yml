@@ -2,9 +2,14 @@ name: Deploy to Azure Web App
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+  # Push trigger comentado para evitar deploy automático no primeiro commit
+  # Descomente as linhas abaixo se quiser deploy automático em futuros pushes:
+  # push:
+  #   branches:
+  #     - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -13,199 +18,82 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js version
         uses: actions/setup-node@v3
         with:
-          node-version: '20.x'
+          node-version: '22.x'
 
-      - name: Consolidate frontend and backend
+      - name: Build Backend
+        working-directory: ./backend
         run: |
-          # Check if it's a separated frontend/backend structure
-          if [ -d "frontend" ] && [ -d "backend" ]; then
-            echo "🔄 Consolidating frontend/backend project..."
-            
-            # Create consolidated structure
-            mkdir -p consolidated/src
-            mkdir -p consolidated/public
-            mkdir -p consolidated/database
-            
-            # Copy frontend files to consolidated
-            echo "📁 Copying frontend files..."
-            [ -d "frontend/src" ] && cp -r frontend/src/* consolidated/src/ 2>/dev/null || true
-            [ -d "frontend/public" ] && cp -r frontend/public/* consolidated/public/ 2>/dev/null || true
-            [ -f "frontend/package.json" ] && cp frontend/package.json consolidated/package-frontend.json
-            [ -f "frontend/tsconfig.json" ] && cp frontend/tsconfig.json consolidated/
-            [ -f "frontend/tailwind.config.ts" ] && cp frontend/tailwind.config.ts consolidated/
-            [ -f "frontend/next.config.mjs" ] && cp frontend/next.config.mjs consolidated/
-            [ -f "frontend/postcss.config.js" ] && cp frontend/postcss.config.js consolidated/
-            
-            # Copy backend files to consolidated (merging with frontend in src)
-            echo "📁 Merging backend files..."
-            [ -d "backend/src" ] && cp -r backend/src/* consolidated/src/ 2>/dev/null || true
-            [ -f "backend/package.json" ] && cp backend/package.json consolidated/package-backend.json
-            [ -f "backend/tsconfig.json" ] && cp backend/tsconfig.json consolidated/tsconfig-backend.json
-            
-            # Copy database files if exist
-            [ -d "database" ] && cp -r database/* consolidated/database/ 2>/dev/null || true
-            
-            # Merge package.json files
-            echo "📦 Merging package.json dependencies..."
-            node -e "
-              const fs = require('fs');
-              const path = require('path');
-              
-              // Read both package.json files from consolidated folder
-              const frontendPkg = fs.existsSync('consolidated/package-frontend.json') ? 
-                JSON.parse(fs.readFileSync('consolidated/package-frontend.json', 'utf8')) : 
-                { dependencies: {}, devDependencies: {}, scripts: {} };
-              
-              const backendPkg = fs.existsSync('consolidated/package-backend.json') ? 
-                JSON.parse(fs.readFileSync('consolidated/package-backend.json', 'utf8')) : 
-                { dependencies: {}, devDependencies: {}, scripts: {} };
-              
-              // Create merged package.json
-              const mergedPkg = {
-                name: 'project579-v3',
-                version: '1.0.0',
-                description: 'Consolidated project',
-                main: 'dist/server.js',
-                scripts: {
-                  'dev': frontendPkg.scripts?.dev || 'next dev',
-                  'build': 'npm run build:frontend && npm run build:backend',
-                  'build:frontend': frontendPkg.scripts?.build || 'next build',
-                  'build:backend': 'tsc',
-                  'start': 'node dist/server.js',
-                  'test': 'jest --passWithNoTests'
-                },
-                dependencies: {
-                  ...frontendPkg.dependencies,
-                  ...backendPkg.dependencies
-                },
-                devDependencies: {
-                  ...frontendPkg.devDependencies,
-                  ...backendPkg.devDependencies
-                }
-              };
-              
-              // Write merged package.json to consolidated folder
-              fs.writeFileSync('consolidated/package.json', JSON.stringify(mergedPkg, null, 2));
-              
-              // Clean up temporary files
-              fs.existsSync('consolidated/package-frontend.json') && fs.unlinkSync('consolidated/package-frontend.json');
-              fs.existsSync('consolidated/package-backend.json') && fs.unlinkSync('consolidated/package-backend.json');
-              fs.existsSync('consolidated/tsconfig-backend.json') && fs.unlinkSync('consolidated/tsconfig-backend.json');
-              
-              console.log('✅ Package.json merged successfully');
-            "
-            
-            # Update tsconfig.json for consolidated structure
-            node -e "
-              const fs = require('fs');
-              if (fs.existsSync('consolidated/tsconfig.json')) {
-                const tsconfig = JSON.parse(fs.readFileSync('consolidated/tsconfig.json', 'utf8'));
-                tsconfig.compilerOptions = tsconfig.compilerOptions || {};
-                tsconfig.compilerOptions.outDir = './dist';
-                tsconfig.compilerOptions.rootDir = './src';
-                tsconfig.include = ['src/**/*'];
-                tsconfig.exclude = ['node_modules', 'dist', '.next'];
-                fs.writeFileSync('consolidated/tsconfig.json', JSON.stringify(tsconfig, null, 2));
-                console.log('✅ tsconfig.json updated');
-              }
-            "
-            
-            # Move consolidated files to root
-            cp -r consolidated/* . 2>/dev/null || true
-            cp -r consolidated/.[^.]* . 2>/dev/null || true
-            
-            # Clean up
-            rm -rf frontend backend consolidated
-            
-            echo "✅ Consolidation complete!"
-            echo "📁 Final structure:"
-            ls -la
-          fi
+          npm install
+          npm run build --if-present
+          npm run test --if-present -- --passWithNoTests
 
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build application
+      - name: Build Frontend
+        working-directory: ./frontend
         run: |
-          echo "🔨 Building application..."
-          if [ -f "next.config.mjs" ]; then
-            echo "Building Next.js frontend..."
-            npm run build:frontend || npx next build
+          npm install
+          npm run build
+          # Create out directory for static export if using Next.js
+          npm run export || true
+
+      - name: Prepare deployment structure
+        run: |
+          mkdir -p deployment/backend
+          mkdir -p deployment/frontend
+          
+          # Copy backend
+          cp -r backend/* deployment/backend/
+          
+          # Copy frontend build output
+          if [ -d "frontend/.next" ]; then
+            cp -r frontend/.next deployment/frontend/
+            cp -r frontend/public deployment/frontend/ || true
+            cp frontend/package.json deployment/frontend/
+            cp frontend/package-lock.json deployment/frontend/ || true
+            cp frontend/next.config.mjs deployment/frontend/ || true
           fi
           
-          if [ -f "tsconfig.json" ]; then
-            echo "Building TypeScript backend..."
-            npm run build:backend || npx tsc
+          # Copy frontend static files if exported
+          if [ -d "frontend/out" ]; then
+            cp -r frontend/out deployment/frontend/
           fi
           
-          echo "✅ Build complete"
-          ls -la
-          [ -d "dist" ] && echo "dist/ contents:" && ls -la dist/
-          [ -d ".next" ] && echo ".next/ folder found"
+          # Copy startup script if exists
+          if [ -f "startup.sh" ]; then
+            cp startup.sh deployment/
+          fi
           
-      - name: Create Azure startup configuration
-        run: |
-          echo "📝 Creating Azure startup configuration..."
-          
-          # Create web.config for IIS/Windows compatibility
-          cat > web.config << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <configuration>
-            <system.webServer>
-              <handlers>
-                <add name="iisnode" path="dist/server.js" verb="*" modules="iisnode"/>
-              </handlers>
-              <rewrite>
-                <rules>
-                  <rule name="DynamicContent">
-                    <match url=".*" />
-                    <action type="Rewrite" url="dist/server.js"/>
-                  </rule>
-                </rules>
-              </rewrite>
-              <httpErrors existingResponse="PassThrough" />
-            </system.webServer>
-          </configuration>
-          EOF
-          
-          # Create ecosystem.config.js for PM2 (Azure uses PM2)
-          cat > ecosystem.config.js << 'EOF'
-          module.exports = {
-            apps: [{
-              name: 'app',
-              script: './dist/server.js',
-              instances: 1,
-              autorestart: true,
-              watch: false,
-              max_memory_restart: '1G',
-              env: {
-                NODE_ENV: 'production',
-                PORT: process.env.PORT || 8080
-              }
-            }]
-          };
-          EOF
-          
-          # Ensure package.json has correct start script
-          node -e "
-            const fs = require('fs');
-            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
-            pkg.scripts = pkg.scripts || {};
-            pkg.scripts.start = 'node dist/server.js';
-            pkg.scripts['start:pm2'] = 'pm2 start ecosystem.config.js --no-daemon';
-            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-            console.log('✅ Start script configured');
-          "
-          
-          echo "✅ Azure configuration created"
+          # Create startup script with proper line endings
+          printf '#!/bin/bash\n' > deployment/startup.sh
+          printf 'echo "Starting Full Stack Application..."\n' >> deployment/startup.sh
+          printf 'cd /home/site/wwwroot\n\n' >> deployment/startup.sh
+          printf '# Start backend API\n' >> deployment/startup.sh
+          printf 'echo "Starting backend API on port 3001..."\n' >> deployment/startup.sh
+          printf 'cd backend\n' >> deployment/startup.sh
+          printf 'PORT=3001 npm start &\n' >> deployment/startup.sh
+          printf 'BACKEND_PID=$!\n\n' >> deployment/startup.sh
+          printf '# Wait for backend\n' >> deployment/startup.sh
+          printf 'sleep 5\n\n' >> deployment/startup.sh
+          printf '# Start frontend\n' >> deployment/startup.sh
+          printf 'echo "Starting frontend on port 8080..."\n' >> deployment/startup.sh
+          printf 'cd ../frontend\n' >> deployment/startup.sh
+          printf 'PORT=8080 npm start &\n' >> deployment/startup.sh
+          printf 'FRONTEND_PID=$!\n\n' >> deployment/startup.sh
+          printf 'echo "Application started!"\n' >> deployment/startup.sh
+          printf 'echo "Backend PID: $BACKEND_PID"\n' >> deployment/startup.sh
+          printf 'echo "Frontend PID: $FRONTEND_PID"\n\n' >> deployment/startup.sh
+          printf '# Keep processes running\n' >> deployment/startup.sh
+          printf 'wait $BACKEND_PID $FRONTEND_PID\n' >> deployment/startup.sh
+          chmod +x deployment/startup.sh
 
       - name: Zip artifact for deployment
-        run: zip release.zip ./* -r
+        run: |
+          cd deployment
+          zip -r ../release.zip .
 
-      - name: Upload artifact
+      - name: Upload artifact for deployment job
         uses: actions/upload-artifact@v4
         with:
           name: node-app
@@ -217,23 +105,28 @@ jobs:
     environment:
       name: 'Production'
       url: ${{ steps.deploy-to-webapp.outputs.webapp-url }}
+    
+    permissions:
+      id-token: write
 
     steps:
-      - name: Download artifact
+      - name: Download artifact from build job
         uses: actions/download-artifact@v4
         with:
           name: node-app
 
-      - name: Unzip artifact
+      - name: Unzip artifact for deployment
         run: unzip release.zip
-
+      
       - name: Login to Azure
         uses: azure/login@v1
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Deploy to Azure Web App
+      - name: 'Deploy to Azure Web App'
+        id: deploy-to-webapp
         uses: azure/webapps-deploy@v2
         with:
-          app-name: 'expandev-03'
+          app-name: 'expandev-01'
           package: .
+          startup-command: 'bash /home/site/wwwroot/startup.sh'
